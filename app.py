@@ -14,7 +14,7 @@ def get_version() -> str:
 def index():
     return jsonify(
         {
-            "status": "pipeline-test3",
+            "status": "pipeline-test",
             "version": get_version(),
         }
     )
