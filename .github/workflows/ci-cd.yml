@@ -8,7 +8,7 @@ on:
 
 jobs:
   tests:
-    name: (1) Tests
+    name: "(1) Tests"
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
 
@@ -41,7 +41,7 @@ jobs:
           labels: test-passed
 
   security:
-    name: (2) Security checks
+    name: "(2) Security checks"
     if: github.event.pull_request.merged == true
     needs: tests
     runs-on: ubuntu-latest
@@ -58,15 +58,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install flake8 bandit
 
       - name: Lint with flake8
-        run: |
-          pip install flake8
-          flake8 .
+        run: flake8 .
 
       - name: Security scan with bandit
-        run: |
-          bandit -r .
+        run: bandit -r .
 
       - name: Virus scan (ClamAV)
         run: |
@@ -82,7 +80,7 @@ jobs:
           labels: sec-passed
 
   version_and_changelog:
-    name: (3-4) Version & changelog
+    name: "(3-4) Version & changelog"
     if: github.event.pull_request.merged == true
     needs: security
     runs-on: ubuntu-latest
@@ -100,10 +98,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Install deps for script
-        run: |
-          python -m pip install --upgrade pip
 
       - name: Run bump_version_and_changelog
         id: bump
@@ -143,7 +137,7 @@ jobs:
           labels: changelog
 
   docker_build_push:
-    name: (5) Build & push Docker
+    name: "(5) Build & push Docker"
     if: github.event.pull_request.merged == true
     needs: version_and_changelog
     runs-on: ubuntu-latest
@@ -181,7 +175,7 @@ jobs:
           labels: dockerhub
 
   notify_telegram:
-    name: (6) Notify Telegram
+    name: "(6) Notify Telegram"
     if: github.event.pull_request.merged == true
     needs: [version_and_changelog, docker_build_push]
     runs-on: ubuntu-latest
@@ -231,7 +225,7 @@ Docker image: ${FULL_IMAGE}"
             -F document="@artifacts/CHANGELOG.md"
 
   deploy_prod:
-    name: (7) Deploy to PROD (self-hosted)
+    name: "(7) Deploy to PROD (self-hosted)"
     if: github.event.pull_request.merged == true
     needs: docker_build_push
     runs-on: self-hosted
@@ -246,8 +240,7 @@ Docker image: ${FULL_IMAGE}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Pull image
-        run: |
-          docker pull ${IMAGE_NAME}:latest
+        run: docker pull ${IMAGE_NAME}:latest
 
       - name: Up via docker-compose
         run: |
@@ -261,7 +254,7 @@ Docker image: ${FULL_IMAGE}"
           labels: PROD
 
   create_release:
-    name: (8) Create GitHub Release
+    name: "(8) Create GitHub Release"
     if: github.event.pull_request.merged == true
     needs: [version_and_changelog, deploy_prod]
     runs-on: ubuntu-latest
