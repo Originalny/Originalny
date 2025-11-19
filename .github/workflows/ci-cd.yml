@@ -1,17 +1,41 @@
 name: CI/CD
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
     types: [closed]
     branches:
       - main
 
 jobs:
-  ping:
+  tests:
+    name: "(1) Tests"
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
+
     steps:
-      - name: Trigger OK
-        run: echo "Trigger works"
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: pytest
+
+      - name: Smoke test (just run app)
+        run: |
+          python app.py &
+          sleep 3
+          curl -f http://127.0.0.1:8000 || (echo "Smoke test failed" && exit 1)
+
+      - name: Add label test-passed to PR
+        uses: actions-ecosystem/action-add-labels@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          labels: test-passed
