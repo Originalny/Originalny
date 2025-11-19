@@ -1,13 +1,17 @@
-name: test-ci
+name: CI/CD
 
 on:
   push:
     branches:
       - main
+  pull_request:
+    types: [closed]
+    branches:
+      - main
 
 jobs:
-  check-yaml:
+  ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Hello
-        run: echo "CI works"
+      - name: Trigger OK
+        run: echo "Trigger works"
