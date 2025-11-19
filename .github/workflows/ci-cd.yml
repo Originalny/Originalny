@@ -1,0 +1,285 @@
+name: CI/CD
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+
+jobs:
+  tests:
+    name: (1) Tests
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: pytest
+
+      - name: Smoke test (just run app)
+        run: |
+          python app.py &
+          sleep 3
+          curl -f http://127.0.0.1:8000 || (echo "Smoke test failed" && exit 1)
+
+      - name: Add label test-passed to PR
+        uses: actions-ecosystem/action-add-labels@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          labels: test-passed
+
+  security:
+    name: (2) Security checks
+    if: github.event.pull_request.merged == true
+    needs: tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Lint with flake8
+        run: |
+          pip install flake8
+          flake8 .
+
+      - name: Security scan with bandit
+        run: |
+          bandit -r .
+
+      - name: Virus scan (ClamAV)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clamav
+          sudo freshclam || true
+          clamscan -r .
+
+      - name: Add label sec-passed to PR
+        uses: actions-ecosystem/action-add-labels@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          labels: sec-passed
+
+  version_and_changelog:
+    name: (3-4) Version & changelog
+    if: github.event.pull_request.merged == true
+    needs: security
+    runs-on: ubuntu-latest
+    outputs:
+      old_version: ${{ steps.bump.outputs.old_version }}
+      new_version: ${{ steps.bump.outputs.new_version }}
+      change_type: ${{ steps.bump.outputs.change_type }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps for script
+        run: |
+          python -m pip install --upgrade pip
+
+      - name: Run bump_version_and_changelog
+        id: bump
+        run: |
+          BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          AUTHOR="${{ github.event.pull_request.user.login }}"
+          SUMMARY="${{ github.event.pull_request.title }}"
+          export BRANCH_NAME PR_NUMBER AUTHOR SUMMARY
+          python scripts/bump_version_and_changelog.py > bump_output.txt
+          cat bump_output.txt
+          OLD_VERSION=$(grep "^OLD_VERSION=" bump_output.txt | cut -d"=" -f2)
+          NEW_VERSION=$(grep "^NEW_VERSION=" bump_output.txt | cut -d"=" -f2)
+          CHANGE_TYPE=$(grep "^CHANGE_TYPE=" bump_output.txt | cut -d"=" -f2)
+          echo "old_version=$OLD_VERSION" >> $GITHUB_OUTPUT
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "change_type=$CHANGE_TYPE" >> $GITHUB_OUTPUT
+
+      - name: Commit version and changelog
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add VERSION CHANGELOG.md
+          git commit -m "[${{ steps.bump.outputs.new_version }}] <- [${{ steps.bump.outputs.old_version }}] ${{ steps.bump.outputs.change_type }} up"
+          git push origin HEAD:main
+
+      - name: Upload changelog as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: changelog
+          path: CHANGELOG.md
+
+      - name: Add label changelog to PR
+        uses: actions-ecosystem/action-add-labels@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          labels: changelog
+
+  docker_build_push:
+    name: (5) Build & push Docker
+    if: github.event.pull_request.merged == true
+    needs: version_and_changelog
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_NAME: somalet/originalny
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: v
+        run: |
+          VERSION=$(cat VERSION | tr -d '\n')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.v.outputs.version }}
+            ${{ env.IMAGE_NAME }}:latest
+
+      - name: Add label dockerhub to PR
+        uses: actions-ecosystem/action-add-labels@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          labels: dockerhub
+
+  notify_telegram:
+    name: (6) Notify Telegram
+    if: github.event.pull_request.merged == true
+    needs: [version_and_changelog, docker_build_push]
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_NAME: somalet/originalny
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: v
+        run: |
+          VERSION=$(cat VERSION | tr -d '\n')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Download changelog artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: changelog
+          path: ./artifacts
+
+      - name: Send Telegram message
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          VERSION="${{ steps.v.outputs.version }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          REPO="${{ github.repository }}"
+          TAG="v${VERSION}"
+          FULL_IMAGE="${IMAGE_NAME}:${VERSION}"
+
+          TEXT="Новый выпуск изменений%0A\
+Проект: ${REPO}%0A\
+Версия: ${VERSION}%0A\
+PR: #${PR_NUMBER}%0A\
+GIT TAG: ${TAG}%0A\
+Docker image: ${FULL_IMAGE}"
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode="HTML" \
+            -d text="${TEXT}"
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
+            -F chat_id="${TELEGRAM_CHAT_ID}" \
+            -F document="@artifacts/CHANGELOG.md"
+
+  deploy_prod:
+    name: (7) Deploy to PROD (self-hosted)
+    if: github.event.pull_request.merged == true
+    needs: docker_build_push
+    runs-on: self-hosted
+    env:
+      IMAGE_NAME: somalet/originalny
+
+    steps:
+      - name: Read version
+        id: v
+        run: |
+          VERSION=$(cat VERSION | tr -d '\n' || echo "latest")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Pull image
+        run: |
+          docker pull ${IMAGE_NAME}:latest
+
+      - name: Up via docker-compose
+        run: |
+          docker compose down || true
+          docker compose up -d
+
+      - name: Add PROD label to PR
+        uses: actions-ecosystem/action-add-labels@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          labels: PROD
+
+  create_release:
+    name: (8) Create GitHub Release
+    if: github.event.pull_request.merged == true
+    needs: [version_and_changelog, deploy_prod]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: v
+        run: |
+          VERSION=$(cat VERSION | tr -d '\n')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.v.outputs.version }}
+          name: Release v${{ steps.v.outputs.version }}
+          body_path: CHANGELOG.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
